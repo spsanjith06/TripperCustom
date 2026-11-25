@@ -39,11 +39,25 @@ class TripperBleService : Service() {
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var isConnected = false
 
+    // Cache latest navigation packet to restore after 3 seconds
+    private var lastNavPacket: ByteArray? = null
+    private var isCallActive = false
+    private var isNearTurn = false // Priority flag for turns within 100m
+
     private val handler = Handler(Looper.getMainLooper())
+
+    private val revertToNavRunnable = Runnable {
+        if (!isCallActive && isConnected) {
+            lastNavPacket?.let { sendPacket(it) } ?: sendPacket(TripperProtocol.createHeartbeatPacket())
+        }
+    }
+
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             if (isConnected) {
-                sendPacket(TripperProtocol.createHeartbeatPacket())
+                if (!isCallActive && lastNavPacket == null) {
+                    sendPacket(TripperProtocol.createHeartbeatPacket())
+                }
                 handler.postDelayed(this, 3000)
             }
         }
@@ -59,28 +73,52 @@ class TripperBleService : Service() {
                     val etaH = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_H, 0)
                     val etaM = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_M, 0)
 
-                    sendPacket(TripperProtocol.createNavPacket(icon, distVal, distUnit, etaH, etaM))
+                    // If turning within 100 meters, prioritize turn icon over music/whatsapp
+                    isNearTurn = (distUnit == TripperProtocol.UNIT_METERS && distVal <= 100)
+
+                    val packet = TripperProtocol.createNavPacket(icon, distVal, distUnit, etaH, etaM)
+                    lastNavPacket = packet
+
+                    if (!isCallActive) {
+                        sendPacket(packet)
+                    }
                 }
                 CallReceiver.ACTION_CALLER_UPDATE -> {
                     val isRinging = intent.getBooleanExtra(CallReceiver.EXTRA_IS_RINGING, false)
+                    isCallActive = isRinging
                     if (isRinging) {
+                        handler.removeCallbacks(revertToNavRunnable)
                         val callerName = intent.getStringExtra(CallReceiver.EXTRA_CALLER_NAME) ?: "Caller"
                         sendPacket(TripperProtocol.createCallerPacket("CALL: $callerName"))
                     } else {
-                        sendPacket(TripperProtocol.createHeartbeatPacket())
+                        // Call ended, immediate restore
+                        lastNavPacket?.let { sendPacket(it) } ?: sendPacket(TripperProtocol.createHeartbeatPacket())
                     }
                 }
                 MapsNotificationListener.ACTION_MEDIA_UPDATE -> {
-                    val song = intent.getStringExtra(MapsNotificationListener.EXTRA_TRACK_TITLE) ?: ""
-                    sendPacket(TripperProtocol.createCallerPacket("🎵 $song"))
+                    // Flash song title for 3 seconds unless turning right now
+                    if (!isCallActive && !isNearTurn) {
+                        val song = intent.getStringExtra(MapsNotificationListener.EXTRA_TRACK_TITLE) ?: ""
+                        sendPacket(TripperProtocol.createCallerPacket("🎵 $song"))
+                        handler.removeCallbacks(revertToNavRunnable)
+                        handler.postDelayed(revertToNavRunnable, 3500) // Restore nav after 3.5s
+                    }
                 }
                 MapsNotificationListener.ACTION_WHATSAPP_UPDATE -> {
-                    val sender = intent.getStringExtra(MapsNotificationListener.EXTRA_SENDER_NAME) ?: ""
-                    sendPacket(TripperProtocol.createCallerPacket("💬 $sender"))
+                    if (!isCallActive && !isNearTurn) {
+                        val sender = intent.getStringExtra(MapsNotificationListener.EXTRA_SENDER_NAME) ?: ""
+                        sendPacket(TripperProtocol.createCallerPacket("💬 $sender"))
+                        handler.removeCallbacks(revertToNavRunnable)
+                        handler.postDelayed(revertToNavRunnable, 3000)
+                    }
                 }
                 MapsNotificationListener.ACTION_BATTERY_ALERT -> {
-                    val pct = intent.getIntExtra("battery_pct", 15)
-                    sendPacket(TripperProtocol.createCallerPacket("⚠️ BATT $pct%"))
+                    if (!isCallActive) {
+                        val pct = intent.getIntExtra("battery_pct", 15)
+                        sendPacket(TripperProtocol.createCallerPacket("⚠️ BATT $pct%"))
+                        handler.removeCallbacks(revertToNavRunnable)
+                        handler.postDelayed(revertToNavRunnable, 4000)
+                    }
                 }
             }
         }
@@ -118,7 +156,6 @@ class TripperBleService : Service() {
             .build()
 
         scanner.startScan(listOf(filter), settings, scanCallback)
-        Log.d(TAG, "BLE scan started for prefix ${TripperProtocol.DEVICE_NAME_PREFIX}")
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -126,7 +163,6 @@ class TripperBleService : Service() {
             val device = result?.device ?: return
             val name = device.name ?: ""
             if (name.startsWith(TripperProtocol.DEVICE_NAME_PREFIX) || name.contains("RE_")) {
-                Log.d(TAG, "Tripper found: $name, connecting...")
                 bluetoothAdapter?.bluetoothLeScanner?.stopScan(this)
                 bluetoothGatt = device.connectGatt(this@TripperBleService, true, gattCallback)
             }
@@ -205,6 +241,7 @@ class TripperBleService : Service() {
         super.onDestroy()
         unregisterReceiver(dataReceiver)
         handler.removeCallbacks(heartbeatRunnable)
+        handler.removeCallbacks(revertToNavRunnable)
         bluetoothGatt?.close()
         bluetoothGatt = null
     }
