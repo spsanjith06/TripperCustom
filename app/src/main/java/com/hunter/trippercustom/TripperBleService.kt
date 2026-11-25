@@ -39,10 +39,9 @@ class TripperBleService : Service() {
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var isConnected = false
 
-    // Cache latest navigation packet to restore after 3 seconds
     private var lastNavPacket: ByteArray? = null
     private var isCallActive = false
-    private var isNearTurn = false // Priority flag for turns within 100m
+    private var isNearTurn = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -73,9 +72,7 @@ class TripperBleService : Service() {
                     val etaH = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_H, 0)
                     val etaM = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_M, 0)
 
-                    // If turning within 100 meters, prioritize turn icon over music/whatsapp
                     isNearTurn = (distUnit == TripperProtocol.UNIT_METERS && distVal <= 100)
-
                     val packet = TripperProtocol.createNavPacket(icon, distVal, distUnit, etaH, etaM)
                     lastNavPacket = packet
 
@@ -91,17 +88,15 @@ class TripperBleService : Service() {
                         val callerName = intent.getStringExtra(CallReceiver.EXTRA_CALLER_NAME) ?: "Caller"
                         sendPacket(TripperProtocol.createCallerPacket("CALL: $callerName"))
                     } else {
-                        // Call ended, immediate restore
                         lastNavPacket?.let { sendPacket(it) } ?: sendPacket(TripperProtocol.createHeartbeatPacket())
                     }
                 }
                 MapsNotificationListener.ACTION_MEDIA_UPDATE -> {
-                    // Flash song title for 3 seconds unless turning right now
                     if (!isCallActive && !isNearTurn) {
                         val song = intent.getStringExtra(MapsNotificationListener.EXTRA_TRACK_TITLE) ?: ""
                         sendPacket(TripperProtocol.createCallerPacket("🎵 $song"))
                         handler.removeCallbacks(revertToNavRunnable)
-                        handler.postDelayed(revertToNavRunnable, 3500) // Restore nav after 3.5s
+                        handler.postDelayed(revertToNavRunnable, 3500)
                     }
                 }
                 MapsNotificationListener.ACTION_WHATSAPP_UPDATE -> {
@@ -148,23 +143,32 @@ class TripperBleService : Service() {
 
     private fun startScan() {
         val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
-        val filter = ScanFilter.Builder()
-            .setDeviceName(TripperProtocol.DEVICE_NAME_PREFIX)
-            .build()
+        
+        // Scan without strict name filter to catch all RE Pod variants
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        scanner.startScan(listOf(filter), settings, scanCallback)
+        scanner.startScan(null, settings, scanCallback)
+        Log.d(TAG, "Aggressive BLE scan started for all nearby Tripper pods")
     }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
-            val name = device.name ?: ""
-            if (name.startsWith(TripperProtocol.DEVICE_NAME_PREFIX) || name.contains("RE_")) {
+            val name = (device.name ?: "").uppercase()
+            
+            // Check for any Royal Enfield Tripper Pod signature
+            val isTripper = name.contains("RE") || 
+                            name.contains("DISP") || 
+                            name.contains("TRIPPER") || 
+                            name.contains("ENFIELD") ||
+                            name.contains("ROYAL")
+
+            if (isTripper) {
+                Log.d(TAG, "Tripper found: ${device.name} (${device.address}), connecting...")
                 bluetoothAdapter?.bluetoothLeScanner?.stopScan(this)
-                bluetoothGatt = device.connectGatt(this@TripperBleService, true, gattCallback)
+                bluetoothGatt = device.connectGatt(this@TripperBleService, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
             }
         }
     }
@@ -172,12 +176,14 @@ class TripperBleService : Service() {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.d(TAG, "Connected to GATT server.")
                 isConnected = true
                 gatt.discoverServices()
                 notifyStatus(true, gatt.device.name ?: "Tripper Pod")
                 updateNotification("Connected to ${gatt.device.name ?: "Tripper Pod"}")
                 handler.post(heartbeatRunnable)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                Log.d(TAG, "Disconnected from GATT server.")
                 isConnected = false
                 writeCharacteristic = null
                 handler.removeCallbacks(heartbeatRunnable)
@@ -189,8 +195,14 @@ class TripperBleService : Service() {
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt.getService(TripperProtocol.SERVICE_UUID)
-                writeCharacteristic = service?.getCharacteristic(TripperProtocol.CHAR_WRITE_UUID)
+                for (service in gatt.services) {
+                    val char = service.getCharacteristic(TripperProtocol.CHAR_WRITE_UUID)
+                    if (char != null) {
+                        writeCharacteristic = char
+                        Log.d(TAG, "Found target write characteristic in service: ${service.uuid}")
+                        break
+                    }
+                }
             }
         }
     }
