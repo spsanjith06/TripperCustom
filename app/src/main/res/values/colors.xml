@@ -1,0 +1,8 @@
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="hunter_red">#D32F2F</color>
+    <color name="hunter_dark">#1B1B1B</color>
+    <color name="hunter_accent">#FFA000</color>
+    <color name="green_status">#4CAF50</color>
+</resources>

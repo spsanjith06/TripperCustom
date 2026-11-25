@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Tripper Hunter</string>
+    <string name="status_disconnected">Status: Disconnected</string>
+    <string name="status_connected">Status: Connected to Tripper Pod</string>
+    <string name="btn_connect">Connect Tripper Pod</string>
+    <string name="btn_disconnect">Disconnect</string>
+    <string name="permission_note">Please grant Bluetooth, Notification Access, and Phone permissions for live turn-by-turn navigation &amp; Caller ID.</string>
+</resources>
