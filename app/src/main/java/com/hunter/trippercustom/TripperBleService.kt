@@ -44,7 +44,7 @@ class TripperBleService : Service() {
         override fun run() {
             if (isConnected) {
                 sendPacket(TripperProtocol.createHeartbeatPacket())
-                handler.postDelayed(this, 3000) // Keep-alive every 3s
+                handler.postDelayed(this, 3000)
             }
         }
     }
@@ -59,19 +59,28 @@ class TripperBleService : Service() {
                     val etaH = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_H, 0)
                     val etaM = intent.getIntExtra(MapsNotificationListener.EXTRA_ETA_M, 0)
 
-                    val packet = TripperProtocol.createNavPacket(icon, distVal, distUnit, etaH, etaM)
-                    sendPacket(packet)
+                    sendPacket(TripperProtocol.createNavPacket(icon, distVal, distUnit, etaH, etaM))
                 }
                 CallReceiver.ACTION_CALLER_UPDATE -> {
                     val isRinging = intent.getBooleanExtra(CallReceiver.EXTRA_IS_RINGING, false)
                     if (isRinging) {
                         val callerName = intent.getStringExtra(CallReceiver.EXTRA_CALLER_NAME) ?: "Caller"
-                        val packet = TripperProtocol.createCallerPacket(callerName)
-                        sendPacket(packet)
+                        sendPacket(TripperProtocol.createCallerPacket("CALL: $callerName"))
                     } else {
-                        // Return to normal heartbeat / navigation
                         sendPacket(TripperProtocol.createHeartbeatPacket())
                     }
+                }
+                MapsNotificationListener.ACTION_MEDIA_UPDATE -> {
+                    val song = intent.getStringExtra(MapsNotificationListener.EXTRA_TRACK_TITLE) ?: ""
+                    sendPacket(TripperProtocol.createCallerPacket("🎵 $song"))
+                }
+                MapsNotificationListener.ACTION_WHATSAPP_UPDATE -> {
+                    val sender = intent.getStringExtra(MapsNotificationListener.EXTRA_SENDER_NAME) ?: ""
+                    sendPacket(TripperProtocol.createCallerPacket("💬 $sender"))
+                }
+                MapsNotificationListener.ACTION_BATTERY_ALERT -> {
+                    val pct = intent.getIntExtra("battery_pct", 15)
+                    sendPacket(TripperProtocol.createCallerPacket("⚠️ BATT $pct%"))
                 }
             }
         }
@@ -85,6 +94,9 @@ class TripperBleService : Service() {
         val filter = IntentFilter().apply {
             addAction(MapsNotificationListener.ACTION_NAV_UPDATE)
             addAction(CallReceiver.ACTION_CALLER_UPDATE)
+            addAction(MapsNotificationListener.ACTION_MEDIA_UPDATE)
+            addAction(MapsNotificationListener.ACTION_WHATSAPP_UPDATE)
+            addAction(MapsNotificationListener.ACTION_BATTERY_ALERT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(dataReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -124,14 +136,12 @@ class TripperBleService : Service() {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d(TAG, "Connected to GATT server.")
                 isConnected = true
                 gatt.discoverServices()
                 notifyStatus(true, gatt.device.name ?: "Tripper Pod")
                 updateNotification("Connected to ${gatt.device.name ?: "Tripper Pod"}")
                 handler.post(heartbeatRunnable)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                Log.d(TAG, "Disconnected from GATT server.")
                 isConnected = false
                 writeCharacteristic = null
                 handler.removeCallbacks(heartbeatRunnable)
@@ -145,7 +155,6 @@ class TripperBleService : Service() {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val service = gatt.getService(TripperProtocol.SERVICE_UUID)
                 writeCharacteristic = service?.getCharacteristic(TripperProtocol.CHAR_WRITE_UUID)
-                Log.d(TAG, "Services discovered. Write Char: $writeCharacteristic")
             }
         }
     }

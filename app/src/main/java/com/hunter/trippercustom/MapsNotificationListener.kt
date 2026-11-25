@@ -1,7 +1,11 @@
 package com.hunter.trippercustom
 
 import android.app.Notification
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -11,12 +15,48 @@ class MapsNotificationListener : NotificationListenerService() {
     companion object {
         private const val TAG = "MapsNotifListener"
         const val ACTION_NAV_UPDATE = "com.hunter.trippercustom.ACTION_NAV_UPDATE"
+        const val ACTION_MEDIA_UPDATE = "com.hunter.trippercustom.ACTION_MEDIA_UPDATE"
+        const val ACTION_WHATSAPP_UPDATE = "com.hunter.trippercustom.ACTION_WHATSAPP_UPDATE"
+        const val ACTION_BATTERY_ALERT = "com.hunter.trippercustom.ACTION_BATTERY_ALERT"
+
         const val EXTRA_ICON = "extra_icon"
         const val EXTRA_DIST_VAL = "extra_dist_val"
         const val EXTRA_DIST_UNIT = "extra_dist_unit"
         const val EXTRA_ETA_H = "extra_eta_h"
         const val EXTRA_ETA_M = "extra_eta_m"
         const val EXTRA_RAW_TEXT = "extra_raw_text"
+        const val EXTRA_TRACK_TITLE = "extra_track_title"
+        const val EXTRA_SENDER_NAME = "extra_sender_name"
+    }
+
+    private var lastBatteryAlertTime: Long = 0
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level >= 0 && scale > 0) {
+                val batteryPct = (level * 100) / scale
+                val now = System.currentTimeMillis()
+                if (batteryPct <= 15 && (now - lastBatteryAlertTime > 180000)) { // Alert every 3 mins if low
+                    lastBatteryAlertTime = now
+                    val alertIntent = Intent(ACTION_BATTERY_ALERT).apply {
+                        putExtra("battery_pct", batteryPct)
+                    }
+                    sendBroadcast(alertIntent)
+                }
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(batteryReceiver)
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -24,34 +64,51 @@ class MapsNotificationListener : NotificationListenerService() {
         if (sbn == null) return
 
         val pkg = sbn.packageName
-        if (pkg != "com.google.android.apps.maps") return
-
         val extras = sbn.notification.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString() ?: ""
 
-        val fullText = "$title $text $subText".lowercase()
-        Log.d(TAG, "Maps Notif: title='$title', text='$text', subText='$subText'")
+        // 1. Google Maps
+        if (pkg == "com.google.android.apps.maps") {
+            val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString() ?: ""
+            val fullText = "$title $text $subText".lowercase()
 
-        // Parse turn direction
-        val icon = parseManeuverIcon(fullText)
+            val icon = parseManeuverIcon(fullText)
+            val (distVal, distUnit) = parseDistance(title)
+            val (etaH, etaM) = parseEta(subText.ifEmpty { text })
 
-        // Parse distance
-        val (distVal, distUnit) = parseDistance(title)
-
-        // Parse ETA
-        val (etaH, etaM) = parseEta(subText.ifEmpty { text })
-
-        val intent = Intent(ACTION_NAV_UPDATE).apply {
-            putExtra(EXTRA_ICON, icon)
-            putExtra(EXTRA_DIST_VAL, distVal)
-            putExtra(EXTRA_DIST_UNIT, distUnit)
-            putExtra(EXTRA_ETA_H, etaH)
-            putExtra(EXTRA_ETA_M, etaM)
-            putExtra(EXTRA_RAW_TEXT, "$title | $text")
+            val intent = Intent(ACTION_NAV_UPDATE).apply {
+                putExtra(EXTRA_ICON, icon)
+                putExtra(EXTRA_DIST_VAL, distVal)
+                putExtra(EXTRA_DIST_UNIT, distUnit)
+                putExtra(EXTRA_ETA_H, etaH)
+                putExtra(EXTRA_ETA_M, etaM)
+                putExtra(EXTRA_RAW_TEXT, "$title | $text")
+            }
+            sendBroadcast(intent)
+            return
         }
-        sendBroadcast(intent)
+
+        // 2. Spotify & YouTube Music
+        if (pkg.contains("spotify") || pkg.contains("youtube.music")) {
+            if (title.isNotEmpty()) {
+                val intent = Intent(ACTION_MEDIA_UPDATE).apply {
+                    putExtra(EXTRA_TRACK_TITLE, title.take(16))
+                }
+                sendBroadcast(intent)
+            }
+            return
+        }
+
+        // 3. WhatsApp Sender Alert
+        if (pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b") {
+            if (title.isNotEmpty() && !title.contains("WhatsApp") && !title.contains("messages")) {
+                val intent = Intent(ACTION_WHATSAPP_UPDATE).apply {
+                    putExtra(EXTRA_SENDER_NAME, title.take(14))
+                }
+                sendBroadcast(intent)
+            }
+        }
     }
 
     private fun parseManeuverIcon(text: String): Byte {
@@ -75,7 +132,6 @@ class MapsNotificationListener : NotificationListenerService() {
     }
 
     private fun parseDistance(text: String): Pair<Int, Byte> {
-        // Examples: "500 m", "1.2 km", "350 ft", "2 mi"
         val regex = Regex("""([0-9]+(?:\.[0-9]+)?)\s*(m|km|ft|mi)""", RegexOption.IGNORE_CASE)
         val match = regex.find(text)
         if (match != null) {
@@ -93,7 +149,6 @@ class MapsNotificationListener : NotificationListenerService() {
     }
 
     private fun parseEta(text: String): Pair<Int, Int> {
-        // Examples: "5:45 PM", "18:30", "ETA 12:15"
         val regex = Regex("""([0-9]{1,2}):([0-9]{2})""")
         val match = regex.find(text)
         if (match != null) {
